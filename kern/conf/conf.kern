@@ -445,6 +445,7 @@ file		test/bitmaptest.c
 file		test/threadlisttest.c
 file		test/threadtest.c
 file		test/tt3.c
+file		test/tt4.c
 file		test/synchtest.c
 file		test/semunit.c
 file		test/kmalloctest.c

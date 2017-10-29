@@ -61,6 +61,13 @@ struct wchan {
 	struct threadlist wc_threads;	/* list of waiting threads */
 };
 
+struct threadList {
+	bool ids[8192];
+	struct spinlock idlist_spinlock;
+};
+
+static struct threadList id_list;
+
 /* Master array of CPUs. */
 DECLARRAY(cpu, static __UNUSED inline);
 DEFARRAY(cpu, static __UNUSED inline);
@@ -150,6 +157,13 @@ thread_create(const char *name)
 	thread->t_did_reserve_buffers = false;
 
 	/* If you add to struct thread, be sure to initialize here */
+
+	thread->t_id = assign_id();
+	thread->t_lock = lock_create("help me");
+	thread->t_cv = cv_create("help me");
+	thread->t_wchan = NULL;	
+	thread->child = NULL;
+	thread->parent = NULL;
 
 	return thread;
 }
@@ -784,9 +798,28 @@ thread_exit(void)
 	struct thread *cur;
 
 	cur = curthread;
-
 	KASSERT(cur->t_did_reserve_buffers == false);
 
+	//make sure joined threads wait for child to finish
+	lock_acquire(cur->t_lock);
+	
+	if(cur->child) 
+	{
+		while(cur->child_complete == false)
+		{
+			cv_wait(cur->t_cv, cur->t_lock);
+		}
+
+		cv_broadcast(cur->t_cv, cur->t_lock);
+		lock_release(cur->t_lock);
+	}
+
+	cv_destroy(cur->t_cv);
+	lock_destroy(cur->t_lock);
+
+	release_id(cur->t_id);
+	cur->child_complete = true;
+	cur->child = NULL;
 	/*
 	 * Detach from our process. You might need to move this action
 	 * around, depending on how your wait/exit works.
@@ -1214,4 +1247,112 @@ interprocessor_interrupt(void)
 
 	curcpu->c_ipi_pending = 0;
 	spinlock_release(&curcpu->c_ipi_lock);
+}
+
+//my functions
+int thread_fork_join(const char *name, struct proc *proc,
+		void (*entrypoint)(void *data1, unsigned long data2),
+		void *data1, unsigned long data2)
+{
+	struct thread *newthread;
+	int result;
+
+	newthread = thread_create(name);
+	if (newthread == NULL) {
+		return ENOMEM;
+	}
+
+	/* Allocate a stack */
+	newthread->t_stack = kmalloc(STACK_SIZE);
+	if (newthread->t_stack == NULL) {
+		thread_destroy(newthread);
+		return ENOMEM;
+	}
+	thread_checkstack_init(newthread);
+
+	/*
+	 * Now we clone various fields from the parent thread.
+	 */	
+	newthread->t_cv = curthread->t_cv;
+	newthread->t_lock = curthread->t_lock;
+	curthread->child = newthread;
+	curthread->child_complete = false;
+	newthread->parent = curthread;
+
+	/* Thread subsystem fields */
+	newthread->t_cpu = curthread->t_cpu;
+
+	/* Attach the new thread to its process */
+	if (proc == NULL) {
+		proc = curthread->t_proc;
+	}
+	result = proc_addthread(proc, newthread);
+	if (result) {
+		/* thread_destroy will clean up the stack */
+		thread_destroy(newthread);
+		return result;
+	}
+
+	/*
+	 * Because new threads come out holding the cpu runqueue lock
+	 * (see notes at bottom of thread_switch), we need to account
+	 * for the spllower() that will be done releasing it.
+	 */
+	newthread->t_iplhigh_count++;
+
+	/* Set up the switchframe so entrypoint() gets called */
+	switchframe_init(newthread, entrypoint, data1, data2);
+
+	/* Lock the current cpu's run queue and make the new thread runnable */
+	thread_make_runnable(newthread, false);
+
+	return 0;
+}
+
+int thread_join(void)
+{
+	KASSERT(curthread->child);
+	lock_acquire(curthread->t_lock);
+
+	cv_signal(curthread->t_cv, curthread->t_lock);
+
+	while(curthread->child_complete == false)
+	{
+		cv_wait(curthread->t_cv, curthread->t_lock);
+	}
+
+	lock_release(curthread->t_lock);
+
+	return curthread->child->t_id;
+}
+
+int assign_id(void)
+{
+	spinlock_acquire(&id_list.idlist_spinlock);
+	int i;
+
+	for(i = 1; i < 8192; i++)
+	{
+		//if the id isn't taken, assign it
+		if(!(id_list.ids[i]))
+		{
+			spinlock_release(&id_list.idlist_spinlock);
+			return i;
+		}
+	}
+
+	spinlock_release(&id_list.idlist_spinlock);
+	return 0;
+}
+
+int release_id(int target_id)
+{
+	spinlock_acquire(&id_list.idlist_spinlock);
+	
+	//set id to false
+	id_list.ids[target_id] = false;
+
+	spinlock_release(&id_list.idlist_spinlock);
+
+	return 0;
 }

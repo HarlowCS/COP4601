@@ -109,6 +109,13 @@ struct thread {
 	bool t_did_reserve_buffers;	/* reserve_buffers() in effect */
 
 	/* add more here as needed */
+	int t_id;
+	bool child_complete;
+	struct lock * t_lock;
+	struct cv *t_cv;
+	struct wchan * t_wchan;
+	struct thread *parent;
+	struct thread *child;
 };
 
 /*
@@ -171,5 +178,13 @@ void schedule(void);
  */
 void thread_consider_migration(void);
 
+//my functions
+int thread_fork_join(const char *name, struct proc *proc,
+		void (*func)(void *, unsigned long),
+		void *data1, unsigned long data2);
+
+int thread_join(void);
+int assign_id(void);
+int release_id(int target_id);
 
 #endif /* _THREAD_H_ */
